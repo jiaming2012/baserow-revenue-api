@@ -4,7 +4,10 @@ go 1.24
 
 toolchain go1.24.11
 
-require google.golang.org/genai v1.40.0
+require (
+	google.golang.org/genai v1.40.0
+	gopkg.in/yaml.v2 v2.4.0
+)
 
 require (
 	cloud.google.com/go v0.116.0 // indirect

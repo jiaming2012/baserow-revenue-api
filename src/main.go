@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,9 +9,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
+	"gopkg.in/yaml.v2"
 )
 
 type MercuryPagination struct {
@@ -94,7 +97,7 @@ func run_fetch_transactions(ctx context.Context, bankApiKey string, start, end t
 					continue
 				}
 			}
-			
+
 			fmt.Printf("Transaction ID: %s has %d attachments\n", tx.ID, len(tx.Attachments))
 			fmt.Printf("Desc: %s\n", tx.BankDescription)
 			fmt.Printf("Amount: %.2f\n", tx.Amount)
@@ -147,8 +150,266 @@ func run_parse_receipt_with_genai(ctx context.Context, client *genai.Client) err
 	return nil
 }
 
+const (
+	BaserowItemTableID         = "786113"
+	BaserowTagTableID          = "786134"
+	BaserowPurchaseItemTableID = "786129"
+)
+
+// Define a struct to match the JSON response structure of your Baserow table
+// Make sure field names and types match your specific Baserow fields.
+type Row struct {
+	ID     int    `json:"id"`
+	Name   string `json:"field_your_name_field_id"` // Use the field ID from the API docs
+	Status string `json:"field_your_status_field_id"`
+}
+
+type BaserowClient struct {
+	ApiKey  string
+	BaseURL string
+}
+
+type BaserowItemTable struct {
+	Name string `json:"Name"`
+}
+
+func (b BaserowItemTable) GetTableID() string {
+	return BaserowItemTableID
+}
+
+type BaserowTagTable struct {
+	TagName string `json:"Name"`
+}
+
+func (b BaserowTagTable) GetTableID() string {
+	return BaserowTagTableID
+}
+
+type BaserowPurchaseItemTable struct {
+	Description string `json:"Description"`
+}
+
+func (b BaserowPurchaseItemTable) GetTableID() string {
+	return BaserowPurchaseItemTableID
+}
+
+type BaserowData interface {
+	GetTableID() string
+}
+
+type BaserowQueryResponse[T any] struct {
+	Count    int    `json:"count"`
+	Next     string `json:"next"`
+	Previous string `json:"previous"`
+	Results  []T    `json:"results"`
+}
+
+func listRows[T BaserowData](url string, c *BaserowClient) (BaserowQueryResponse[T], error) {
+	client := &http.Client{}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return BaserowQueryResponse[T]{}, fmt.Errorf("Error creating request: %v", err)
+	}
+
+	req.Header.Add("Authorization", "Token "+c.ApiKey)
+	req.Header.Add("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return BaserowQueryResponse[T]{}, fmt.Errorf("Error making API request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return BaserowQueryResponse[T]{}, fmt.Errorf("API request failed with status: %s and error reading body: %v", resp.Status, err)
+		}
+		bodyString := string(bodyBytes)
+
+		return BaserowQueryResponse[T]{}, fmt.Errorf("API request failed with status: %s and body: %s", resp.Status, bodyString)
+	}
+
+	var response BaserowQueryResponse[T]
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return BaserowQueryResponse[T]{}, fmt.Errorf("Error decoding response: %v", err)
+	}
+
+	return response, nil
+}
+
+func ListRows[T BaserowData](c *BaserowClient) ([]T, error) {
+	var instance T
+	url := fmt.Sprintf("%s/api/database/rows/table/%s/?user_field_names=true", c.BaseURL, instance.GetTableID())
+
+	var results []T
+	var count int
+	for {
+		resp, err := listRows[T](url, c)
+		if err != nil {
+			return nil, fmt.Errorf("Error listing rows: %v, url: %s", err, url)
+		}
+
+		results = append(results, resp.Results...)
+		count = resp.Count
+
+		if resp.Next == "" {
+			break
+		} else {
+			url = resp.Next
+		}
+	}
+
+	if len(results) != count {
+		return nil, fmt.Errorf("Mismatch in expected count and results length. Expected: %d, Got: %d", count, len(results))
+	}
+
+	return results, nil
+}
+
+func (c *BaserowClient) CreateRow(data BaserowData) error {
+	client := &http.Client{}
+	url := fmt.Sprintf("%s/api/database/rows/table/%s/?user_field_names=true", c.BaseURL, data.GetTableID())
+
+	rawData, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("Error marshalling data: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(rawData))
+	if err != nil {
+		return fmt.Errorf("Error creating request: %v", err)
+	}
+
+	req.Header.Add("Authorization", "Token "+c.ApiKey)
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("Error making API request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("API request failed with status: %s and error reading body: %v", resp.Status, err)
+		}
+		bodyString := string(bodyBytes)
+		return fmt.Errorf("API request failed with status: %s and body: %s", resp.Status, bodyString)
+	}
+
+	return nil
+}
+
+func NewBaserowClient(baseURL, apiKey string) *BaserowClient {
+	return &BaserowClient{
+		ApiKey:  apiKey,
+		BaseURL: baseURL,
+	}
+}
+
+type PurchaseItemDTO struct {
+	Description string   `yaml:"description"`
+	Exclusions  []string `yaml:"exclusions"`
+}
+
+type PurchaseItemGroupDTO struct {
+	Name          string            `yaml:"name"`
+	Tags          []string          `yaml:"tags"`
+	PurchaseItems []PurchaseItemDTO `yaml:"purchase_items"`
+}
+
+func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *BaserowClient) error {
+	projectDir := os.Getenv("PROJECT_DIR")
+	if projectDir == "" {
+		return fmt.Errorf("PROJECT_DIR environment variable not set")
+	}
+
+	yamlFilePath := fmt.Sprintf("%s/fixtures/purchase_item_groups.yaml", projectDir)
+	yamlBytes, err := os.ReadFile(yamlFilePath)
+	if err != nil {
+		return fmt.Errorf("run_apply_purchase_item_groups_fixtures: failed to read YAML file: %w", err)
+	}
+
+	// Parse YAML content
+	var groups []PurchaseItemGroupDTO
+	if err := yaml.Unmarshal(yamlBytes, &groups); err != nil {
+		return fmt.Errorf("Error parsing YAML file: %v", err)
+	}
+
+	// Fetch existing tags from Baserow
+	existingTagsMap := make(map[string]struct{})
+	tagRows, err := ListRows[BaserowTagTable](client)
+	for _, tagRow := range tagRows {
+		existingTagsMap[tagRow.TagName] = struct{}{}
+	}
+
+	// Identify and add new tags
+	newTagsToAdd := []BaserowTagTable{}
+	for _, group := range groups {
+		for _, tag := range group.Tags {
+			if _, exists := existingTagsMap[tag]; !exists {
+				newTagsToAdd = append(newTagsToAdd, BaserowTagTable{
+					TagName: tag,
+				})
+				existingTagsMap[tag] = struct{}{}
+			}
+		}
+	}
+
+	for _, tag := range newTagsToAdd {
+		if err := client.CreateRow(tag); err != nil {
+			return fmt.Errorf("Failed to create tag row: %w", err)
+		}
+	}
+
+	// Fetch existing purchase items from Baserow
+	existingPurchaseItemsMap := make(map[string]struct{})
+	purchaseItemRows, err := ListRows[BaserowPurchaseItemTable](client)
+	if err != nil {
+		return fmt.Errorf("Failed to list purchase item rows: %w", err)
+	}
+
+	for _, itemRow := range purchaseItemRows {
+		existingPurchaseItemsMap[itemRow.Description] = struct{}{}
+	}
+
+	// Identify and add new purchase items
+	newPurchaseItemsToAdd := []BaserowPurchaseItemTable{}
+	for _, group := range groups {
+		for _, item := range group.PurchaseItems {
+			// Remove % signs from description for matching
+			description := strings.ReplaceAll(item.Description, "%", "")
+			if description == "" {
+				continue
+			}
+
+			if _, exists := existingPurchaseItemsMap[description]; !exists {
+				newPurchaseItemsToAdd = append(newPurchaseItemsToAdd, BaserowPurchaseItemTable{
+					Description: description,
+				})
+				existingPurchaseItemsMap[description] = struct{}{}
+			}
+		}
+	}
+
+	for _, item := range newPurchaseItemsToAdd {
+		if err := client.CreateRow(item); err != nil {
+			return fmt.Errorf("Failed to create purchase item row: %w", err)
+		}
+	}
+
+	// Fetch existing purchase item groups from Baserow
+	
+
+	return nil
+}
+
 func main() {
-	ctx := context.Background()
+	// ctx := context.Background()
 
 	// AiApiKey := os.Getenv("AI_API_KEY")
 	// if AiApiKey == "" {
@@ -178,4 +439,30 @@ func main() {
 	// if err := run_parse_receipt_with_genai(ctx, client); err != nil {
 	// 	log.Fatal(fmt.Errorf("Failed to parse receipt: %w", err))
 	// }
+
+	baserowApiKey := "hMX57EJDuf8rrB68BaLpY8BPxqFS4x87"
+	baserowClient := NewBaserowClient("https://api.baserow.io", baserowApiKey)
+
+	// newRow := BaserowItemTable{
+	// 	Name: "Test Item from Go Client",
+	// }
+
+	// if err := baserowClient.CreateRow(newRow); err != nil {
+	// 	log.Fatal(fmt.Errorf("Failed to create Baserow row: %w", err))
+	// }
+
+	// rows, err := ListRows[BaserowItemTable](baserowClient)
+	// if err != nil {
+	// 	log.Fatal(fmt.Errorf("Failed to list Baserow rows: %w", err))
+	// }
+
+	// for _, row := range rows {
+	// 	fmt.Printf("Row: %+v\n", row)
+	// }
+
+	// fmt.Println("Successfully created a new row in Baserow!")
+
+	if err := run_apply_purchase_item_groups_fixtures(context.Background(), baserowClient); err != nil {
+		log.Fatal(fmt.Errorf("Failed to apply purchase item groups fixtures: %w", err))
+	}
 }
