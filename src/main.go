@@ -151,9 +151,10 @@ func run_parse_receipt_with_genai(ctx context.Context, client *genai.Client) err
 }
 
 const (
-	BaserowItemTableID         = "786113"
-	BaserowTagTableID          = "786134"
-	BaserowPurchaseItemTableID = "786129"
+	BaserowItemTableID              = "786113"
+	BaserowTagTableID               = "786134"
+	BaserowPurchaseItemTableID      = "786129"
+	BaserowPurchaseItemGroupTableID = "786135"
 )
 
 // Define a struct to match the JSON response structure of your Baserow table
@@ -178,6 +179,7 @@ func (b BaserowItemTable) GetTableID() string {
 }
 
 type BaserowTagTable struct {
+	ID      int    `json:"id"`
 	TagName string `json:"Name"`
 }
 
@@ -186,11 +188,38 @@ func (b BaserowTagTable) GetTableID() string {
 }
 
 type BaserowPurchaseItemTable struct {
+	ID          int    `json:"id"`
 	Description string `json:"Description"`
 }
 
 func (b BaserowPurchaseItemTable) GetTableID() string {
 	return BaserowPurchaseItemTableID
+}
+
+type NestedItem struct {
+	ID    int    `json:"id"`
+	Value string `json:"value"`
+	Order string `json:"order"`
+}
+
+type BaserowPurchaseItemGroupTable struct {
+	Name          string       `json:"Name"`
+	PurchaseItems []NestedItem `json:"Purchase Items"` // Assuming this is a link to multiple purchase items by their IDs
+	Tags          []NestedItem `json:"Tags"`           // Assuming this is a link to multiple tags by their IDs
+}
+
+func (b BaserowPurchaseItemGroupTable) GetTableID() string {
+	return BaserowPurchaseItemGroupTableID
+}
+
+type BaserowPurchaseItemGroupTableInsert struct {
+	Name          string   `json:"Name"`
+	PurchaseItems []string `json:"Purchase Items"`
+	Tags          []string `json:"Tags"`
+}
+
+func (b BaserowPurchaseItemGroupTableInsert) GetTableID() string {
+	return BaserowPurchaseItemGroupTableID
 }
 
 type BaserowData interface {
@@ -311,15 +340,26 @@ func NewBaserowClient(baseURL, apiKey string) *BaserowClient {
 	}
 }
 
-type PurchaseItemDTO struct {
+type PurchaseItemYAML struct {
 	Description string   `yaml:"description"`
 	Exclusions  []string `yaml:"exclusions"`
 }
 
-type PurchaseItemGroupDTO struct {
-	Name          string            `yaml:"name"`
-	Tags          []string          `yaml:"tags"`
-	PurchaseItems []PurchaseItemDTO `yaml:"purchase_items"`
+type PurchaseItemGroupYAML struct {
+	Name          string              `yaml:"name"`
+	Tags          []string            `yaml:"tags"`
+	PurchaseItems []*PurchaseItemYAML `yaml:"purchase_items"`
+}
+
+func getMissingItems[T comparable](existingItems map[string]interface{}, itemsToCheck []T, getKey func(T) string) []T {
+	var missingItems []T
+	for _, item := range itemsToCheck {
+		key := getKey(item)
+		if _, exists := existingItems[key]; !exists {
+			missingItems = append(missingItems, item)
+		}
+	}
+	return missingItems
 }
 
 func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *BaserowClient) error {
@@ -335,16 +375,16 @@ func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *Basero
 	}
 
 	// Parse YAML content
-	var groups []PurchaseItemGroupDTO
+	var groups []PurchaseItemGroupYAML
 	if err := yaml.Unmarshal(yamlBytes, &groups); err != nil {
 		return fmt.Errorf("Error parsing YAML file: %v", err)
 	}
 
 	// Fetch existing tags from Baserow
-	existingTagsMap := make(map[string]struct{})
+	existingTagsMap := make(map[string]BaserowTagTable)
 	tagRows, err := ListRows[BaserowTagTable](client)
 	for _, tagRow := range tagRows {
-		existingTagsMap[tagRow.TagName] = struct{}{}
+		existingTagsMap[tagRow.TagName] = tagRow
 	}
 
 	// Identify and add new tags
@@ -355,7 +395,10 @@ func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *Basero
 				newTagsToAdd = append(newTagsToAdd, BaserowTagTable{
 					TagName: tag,
 				})
-				existingTagsMap[tag] = struct{}{}
+				existingTagsMap[tag] = BaserowTagTable{
+					// todo: execute to create and get ID
+					TagName: tag,
+				}
 			}
 		}
 	}
@@ -367,14 +410,14 @@ func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *Basero
 	}
 
 	// Fetch existing purchase items from Baserow
-	existingPurchaseItemsMap := make(map[string]struct{})
+	existingPurchaseItemsMap := make(map[string]BaserowPurchaseItemTable)
 	purchaseItemRows, err := ListRows[BaserowPurchaseItemTable](client)
 	if err != nil {
 		return fmt.Errorf("Failed to list purchase item rows: %w", err)
 	}
 
 	for _, itemRow := range purchaseItemRows {
-		existingPurchaseItemsMap[itemRow.Description] = struct{}{}
+		existingPurchaseItemsMap[itemRow.Description] = itemRow
 	}
 
 	// Identify and add new purchase items
@@ -391,7 +434,9 @@ func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *Basero
 				newPurchaseItemsToAdd = append(newPurchaseItemsToAdd, BaserowPurchaseItemTable{
 					Description: description,
 				})
-				existingPurchaseItemsMap[description] = struct{}{}
+				existingPurchaseItemsMap[description] = BaserowPurchaseItemTable{
+					Description: description,
+				}
 			}
 		}
 	}
@@ -403,7 +448,69 @@ func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *Basero
 	}
 
 	// Fetch existing purchase item groups from Baserow
-	
+	existingPurchaseItemGroupsMap := make(map[string]interface{})
+	purchaseItemGroupRows, err := ListRows[BaserowPurchaseItemGroupTable](client)
+	if err != nil {
+		return fmt.Errorf("Failed to list purchase item group rows: %w", err)
+	}
+
+	for _, groupRow := range purchaseItemGroupRows {
+		existingPurchaseItemGroupsMap[groupRow.Name] = groupRow
+	}
+
+	// Identify and add new purchase item groups
+	newPurchaseItemGroupsToAdd := []BaserowPurchaseItemGroupTableInsert{}
+	for _, group := range groups {
+		if _, exists := existingPurchaseItemGroupsMap[group.Name]; !exists {
+			item := BaserowPurchaseItemGroupTableInsert{
+				Name:          group.Name,
+				PurchaseItems: []string{},
+				Tags:          []string{},
+			}
+
+			missingPurchaseItems := getMissingItems[*PurchaseItemYAML](existingPurchaseItemGroupsMap, group.PurchaseItems, func(pi *PurchaseItemYAML) string {
+				return strings.ReplaceAll(pi.Description, "%", "")
+			})
+
+			for _, mpi := range missingPurchaseItems {
+				key := strings.ReplaceAll(mpi.Description, "%", "")
+				if key == "" {
+					continue
+				}
+				_, found := existingPurchaseItemsMap[key]
+				if !found {
+					return fmt.Errorf("Purchase item not found for description: %s", key)
+				}
+
+				item.PurchaseItems = append(item.PurchaseItems, key)
+			}
+
+			missingTags := getMissingItems[string](existingPurchaseItemGroupsMap, group.Tags, func(tag string) string {
+				return tag
+			})
+
+			for _, mt := range missingTags {
+				if mt == "" {
+					continue
+				}
+				_, found := existingTagsMap[mt]
+				if !found {
+					return fmt.Errorf("Tag not found for name: %s", mt)
+				}
+
+				item.Tags = append(item.Tags, mt)
+			}
+
+			newPurchaseItemGroupsToAdd = append(newPurchaseItemGroupsToAdd, item)
+			existingPurchaseItemGroupsMap[group.Name] = item
+		}
+	}
+
+	for _, group := range newPurchaseItemGroupsToAdd {
+		if err := client.CreateRow(group); err != nil {
+			return fmt.Errorf("Failed to create purchase item group row: %w", err)
+		}
+	}
 
 	return nil
 }

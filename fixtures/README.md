@@ -1,0 +1,1 @@
+Menu Items were created directly in `baserow.io` without use of migration script.
