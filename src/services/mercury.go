@@ -4,14 +4,37 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
 	"github.com/jiaming2012/receipt-bot/src/models"
 )
 
-func FetchMercuryTransactions(ctx context.Context, apiKey string, startAt, endAt time.Time) (*models.MercuryListAllTransactionsResponse, error) {
+var IgnoreReceiptsNamed = []string{"Expense Reimbursement"}
+
+func FetchReceipts(ctx context.Context, bankApiKey string, start, end time.Time) (validTransactions []*models.MercuryTransaction, invalidTransactions []*models.MercuryTransaction, err error) {
+	resp, err := fetchMercuryTransactions(ctx, bankApiKey, start, end)
+	if err != nil {
+		err = fmt.Errorf("FetchReceipts: failed to fetch mercury transactions: %w", err)
+		return
+	}
+
+	for _, tx := range resp.Transactions {
+		if len(tx.Attachments) > 0 || tx.Note != "" {
+			validTransactions = append(validTransactions, tx)
+		} else {
+			invalidTransactions = append(invalidTransactions, tx)
+		}
+	}
+
+	if len(invalidTransactions) > 0 {
+		err = fmt.Errorf("FetchReceipts: found %d transactions without attachments or notes", len(invalidTransactions))
+	}
+
+	return
+}
+
+func fetchMercuryTransactions(ctx context.Context, apiKey string, startAt, endAt time.Time) (*models.MercuryListAllTransactionsResponse, error) {
 	url := "https://api.mercury.com/api/v1/transactions"
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -48,68 +71,4 @@ func FetchMercuryTransactions(ctx context.Context, apiKey string, startAt, endAt
 	}
 
 	return &transactionsResponse, nil
-}
-
-func listRows[T models.BaserowData](url string, c *models.BaserowClient) (models.BaserowQueryResponse[T], error) {
-	client := &http.Client{}
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return models.BaserowQueryResponse[T]{}, fmt.Errorf("Error creating request: %v", err)
-	}
-
-	req.Header.Add("Authorization", "Token "+c.ApiKey)
-	req.Header.Add("Accept", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return models.BaserowQueryResponse[T]{}, fmt.Errorf("Error making API request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return models.BaserowQueryResponse[T]{}, fmt.Errorf("API request failed with status: %s and error reading body: %v", resp.Status, err)
-		}
-		bodyString := string(bodyBytes)
-
-		return models.BaserowQueryResponse[T]{}, fmt.Errorf("API request failed with status: %s and body: %s", resp.Status, bodyString)
-	}
-
-	var response models.BaserowQueryResponse[T]
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return models.BaserowQueryResponse[T]{}, fmt.Errorf("Error decoding response: %v", err)
-	}
-
-	return response, nil
-}
-
-func ListRows[T models.BaserowData](c *models.BaserowClient) ([]T, error) {
-	var instance T
-	url := fmt.Sprintf("%s/api/database/rows/table/%s/?user_field_names=true", c.BaseURL, instance.GetTableID())
-
-	var results []T
-	var count int
-	for {
-		resp, err := listRows[T](url, c)
-		if err != nil {
-			return nil, fmt.Errorf("Error listing rows: %v, url: %s", err, url)
-		}
-
-		results = append(results, resp.Results...)
-		count = resp.Count
-
-		if resp.Next == "" {
-			break
-		} else {
-			url = resp.Next
-		}
-	}
-
-	if len(results) != count {
-		return nil, fmt.Errorf("Mismatch in expected count and results length. Expected: %d, Got: %d", count, len(results))
-	}
-
-	return results, nil
 }

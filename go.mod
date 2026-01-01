@@ -5,6 +5,7 @@ go 1.24
 toolchain go1.24.11
 
 require (
+	github.com/sirupsen/logrus v1.9.3
 	google.golang.org/genai v1.40.0
 	gopkg.in/yaml.v2 v2.4.0
 )
