@@ -1,7 +1,6 @@
 package services
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -72,20 +71,4 @@ func ListRows[T models.BaserowData](c *models.BaserowClient) ([]T, error) {
 	}
 
 	return results, nil
-}
-
-func CreatePurchaseEventWithItems(ctx context.Context, client *models.BaserowClient, req models.CreateBaserowPurchaseRequest) error {
-	purchaseEvent := &models.BaserowPurchaseEventTable{
-		BankTxID:  req.BankTransaction.ID,
-		Date:      req.BankTransaction.CreatedAt,
-		Tax:       req.ReceiptSummary.Tax,
-		Total:     req.ReceiptSummary.Total,
-		CardLast4: "0000",
-	}
-
-	if err := client.CreateRow(purchaseEvent); err != nil {
-		return fmt.Errorf("CreatePurchaseEventWithItems: failed to create purchase event row: %w", err)
-	}
-
-	return nil
 }

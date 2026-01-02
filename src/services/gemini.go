@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
 
@@ -78,7 +79,7 @@ func ParseReceipt(ctx context.Context, client *genai.Client, receiptURL string) 
 
 	result, err := client.Models.GenerateContent(
 		ctx,
-		"gemini-2.5-flash-lite",
+		"gemini-2.5-pro",
 		contents,
 		nil,
 	)
@@ -94,18 +95,70 @@ func ParseReceipt(ctx context.Context, client *genai.Client, receiptURL string) 
 		return nil, models.ReceiptSummary{}, fmt.Errorf("ParseReceipt: failed to parse JSON body: %w", err)
 	}
 
+	// Validate items total against summary total minus tax
+	itemsTotal := 0.0
+	for _, item := range items {
+		itemsTotal += item.Price * float64(item.Quantity)
+	}
+
+	summaryTotal := summary.Total - summary.Tax
+	if math.Abs(summaryTotal-itemsTotal) > 0.01 {
+		return nil, models.ReceiptSummary{}, fmt.Errorf("ParseReceipt: mismatch between summary total (%.2f) and sum of item totals (%.2f) for receiptURL: %s", summaryTotal, itemsTotal, receiptURL)
+	}
+
+	// Validate total units and cases
 	totalItems := 0
 	for _, item := range items {
 		totalItems += item.Quantity
 	}
 
 	if summary.TotalUnits+summary.TotalCases != totalItems {
-		_, _, err := parseJSONBody(jsonResp)
-		if err != nil {
-			return nil, models.ReceiptSummary{}, fmt.Errorf("ParseReceipt: failed to parse JSON body: %w", err)
-		}
-		return nil, models.ReceiptSummary{}, fmt.Errorf("ParseReceipt: mismatch between summary total units/cases and number of items parsed")
+		return nil, models.ReceiptSummary{}, fmt.Errorf("ParseReceipt: mismatch between summary total units/cases (%d) and number of items parsed (%d) for receiptURL: %s", summary.TotalUnits+summary.TotalCases, totalItems, receiptURL)
 	}
 
 	return items, summary, nil
 }
+
+// func ManuallyParseReceipt(oldItems []models.ReceiptItem, oldSummary models.ReceiptSummary) ([]models.ReceiptItem, models.ReceiptSummary, error) {
+// 	var newItems []models.ReceiptItem
+// 	for i, old := range oldItems {
+// 		newItem := models.ReceiptItem{}
+
+// 		fmt.Printf("item[%d].Name = %s (y/n)?", i+1, old.Name)
+// 		var resp string
+// 		fmt.Scanln(&resp)
+// 		if strings.ToLower(resp) == "y" || strings.ToLower(resp) == "yes" {
+// 			newItem.Name = old.Name
+// 		} else {
+// 			fmt.Printf("Enter correct name: ")
+// 			fmt.Scanln(&newItem.Name)
+// 		}
+
+// 		fmt.Printf("item[%d].Price = %.2f (y/n)?", i+1, old.Price)
+// 		fmt.Scanln(&resp)
+// 		if strings.ToLower(resp) == "y" || strings.ToLower(resp) == "yes" {
+// 			newItem.Price = old.Price
+// 		} else {
+// 			fmt.Printf("Enter correct price: ")
+// 			fmt.Scanln(&newItem.Price)
+// 		}
+
+// 		fmt.Printf("item[%d].Quantity = %d (y/n)?", i+1, old.Quantity)
+// 		fmt.Scanln(&resp)
+// 		if strings.ToLower(resp) == "y" || strings.ToLower(resp) == "yes" {
+// 			newItem.Quantity = old.Quantity
+// 		} else {
+// 			fmt.Printf("Enter correct quantity: ")
+// 			fmt.Scanln(&newItem.Quantity)
+// 		}
+
+// 		fmt.Printf("item[%d].IsCase = %t (y/n)?", i+1, old.IsCase)
+// 		fmt.Scanln(&resp)
+// 		if strings.ToLower(resp) == "y" || strings.ToLower(resp) == "yes" {
+// 			newItem.IsCase = old.IsCase
+// 		} else {
+// 			fmt.Printf("Enter correct IsCase (true/false): ")
+// 			fmt.Scanln(&newItem.IsCase)
+// 	}
+
+// 	newItems = append(newItems, newItem)

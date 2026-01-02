@@ -226,22 +226,32 @@ func main() {
 	if baserowApiKey == "" {
 		log.Fatal("BASEROW_API_KEY environment variable is not set")
 	}
-	
+
 	baserowClient := models.NewBaserowClient("https://api.baserow.io", baserowApiKey)
+
+	// fetch existing purchase events
+	purchaseEventsDTOs, err := services.ListRows[models.BaserowPurchaseEventTableDTO](baserowClient)
+	if err != nil {
+		log.Fatal(fmt.Errorf("Failed to list purchase events: %w", err))
+	}
+
+	var purchaseEvents []models.BaserowPurchaseEventTable
+	for _, dto := range purchaseEventsDTOs {
+		ev, err := dto.ToBaserowPurchaseEventTable()
+		if err != nil {
+			log.Fatal(fmt.Errorf("Failed to convert purchase event DTO: %w", err))
+		}
+		purchaseEvents = append(purchaseEvents, ev)
+	}
+
+	existingPurchaseEventsMap := make(map[string]interface{})
+	for _, pe := range purchaseEvents {
+		existingPurchaseEventsMap[pe.BankTxID] = pe
+	}
 
 	var newPurchaseRequests []models.CreateBaserowPurchaseRequest
 	validTx, invalidTx, err := services.FetchReceipts(context.Background(), bankApiKey, start, end)
 	if len(validTx) > 0 {
-		purchaseEvents, err := services.ListRows[models.BaserowPurchaseEventTable](baserowClient)
-		if err != nil {
-			log.Fatal(fmt.Errorf("Failed to list purchase events: %w", err))
-		}
-
-		existingPurchaseEventsMap := make(map[string]interface{})
-		for _, pe := range purchaseEvents {
-			existingPurchaseEventsMap[pe.BankTxID] = pe
-		}
-
 		missingPurchaseEvents := getMissingItems(existingPurchaseEventsMap, validTx, func(tx *models.MercuryTransaction) string {
 			return tx.ID
 		})
@@ -264,12 +274,101 @@ func main() {
 					newPurchaseRequests = append(newPurchaseRequests, req)
 				}
 			}
+
+			// temp: for testing
+			if len(newPurchaseRequests) > 0 {
+				break
+			}
 		}
 	}
 
+	// fetch existing vendors
+	exisitingVendors, err := services.ListRows[models.BaserowVendorTable](baserowClient)
+	if err != nil {
+		log.Fatal(fmt.Errorf("Failed to list existing vendors: %w", err))
+	}
+
+	existingVendorsMap := make(map[string]models.BaserowVendorTable)
+	for _, v := range exisitingVendors {
+		existingVendorsMap[v.Name] = v
+	}
+
+	// fetch existing purchase items
+	existingPurchaseItems, err := services.ListRows[models.BaserowPurchaseItemTable](baserowClient)
+	if err != nil {
+		log.Fatal(fmt.Errorf("Failed to list existing purchase items: %w", err))
+	}
+
+	existingPurchaseItemMap := make(map[string]models.BaserowPurchaseItemTable)
+	for _, pi := range existingPurchaseItems {
+		existingPurchaseItemMap[pi.Description] = pi
+	}
+
+	// fetch existing purchases
+	// existingPurchases, err := services.ListRows[models.BaserowPurchaseEventTable](baserowClient)
+	// if err != nil {
+	// 	log.Fatal(fmt.Errorf("Failed to list existing purchases: %w", err))
+	// }
+
+	// existingPurchasesMap := make(map[string]models.BaserowPurchaseEventTable)
+	// for _, p := range existingPurchases {
+	// 	existingPurchasesMap[p.BankTxID] = p
+	// }
+
+	// process new purchase requests
 	for _, pr := range newPurchaseRequests {
-		if err := services.CreatePurchaseEventWithItems(ctx, baserowClient, pr); err != nil {
-			log.Fatal(fmt.Errorf("Failed to create purchase event with items: %w", err))
+		vendorPk, isNew := services.DerivePurchaseItem(pr.ReceiptSummary.Vendor, existingVendorsMap)
+		if isNew {
+			newVendor := &models.BaserowVendorTable{
+				Name: vendorPk,
+			}
+
+			if err := baserowClient.CreateRow(newVendor); err != nil {
+				log.Fatal(fmt.Errorf("Failed to create new vendor: %w", err))
+			}
+
+			// update vendor map
+			existingVendorsMap[vendorPk] = *newVendor
+		}
+
+		// update receipt summary vendor to use primary key
+		pr.ReceiptSummary.Vendor = vendorPk
+
+		// process purchase event
+		var purchaseEventID string
+		if _, exists := existingPurchaseEventsMap[pr.BankTransaction.ID]; !exists {
+			purchaseEvent := models.NewPurchaseEvent(pr)
+
+			if err := baserowClient.CreateRow(purchaseEvent); err != nil {
+				log.Fatal(fmt.Errorf("Failed to create purchase event: %w", err))
+			}
+
+			// update purchase events map
+			existingPurchaseEventsMap[pr.BankTransaction.ID] = *purchaseEvent
+
+			purchaseEventID = purchaseEvent.BankTxID
+		} else {
+			purchaseEventID = existingPurchaseEventsMap[pr.BankTransaction.ID].(models.BaserowPurchaseEventTable).BankTxID
+		}
+
+		for _, item := range pr.ReceiptItems {
+			purchaseItemID, isNew := services.DerivePurchaseItem(item.Name, existingPurchaseItemMap)
+			if isNew {
+				purchaseItem := models.NewBaserowPurchaseItemTable(purchaseItemID)
+
+				if err := baserowClient.CreateRow(purchaseItem); err != nil {
+					log.Fatal(fmt.Errorf("Failed to create purchase item: %w", err))
+				}
+
+				// update purchase item map
+				existingPurchaseItemMap[purchaseItem.Description] = purchaseItem
+			}
+
+			purchase := models.NewBaserowPurchaseTable(item, purchaseItemID, purchaseEventID)
+
+			if err := baserowClient.CreateRow(purchase); err != nil {
+				log.Fatal(fmt.Errorf("Failed to create purchase: %w", err))
+			}
 		}
 	}
 

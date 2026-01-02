@@ -5,7 +5,9 @@ go 1.24
 toolchain go1.24.11
 
 require (
+	github.com/antzucaro/matchr v0.0.0-20221106193745-7bed6ef61ef9
 	github.com/sirupsen/logrus v1.9.3
+	golang.org/x/text v0.23.0
 	google.golang.org/genai v1.40.0
 	gopkg.in/yaml.v2 v2.4.0
 )
@@ -23,7 +25,6 @@ require (
 	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/net v0.38.0 // indirect
 	golang.org/x/sys v0.31.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
 	google.golang.org/grpc v1.66.2 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect

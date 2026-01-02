@@ -2,13 +2,6 @@ package models
 
 import "fmt"
 
-const (
-	BaserowItemTableID              = "786113"
-	BaserowTagTableID               = "786134"
-	BaserowPurchaseItemTableID      = "786129"
-	BaserowPurchaseItemGroupTableID = "786135"
-)
-
 type MercuryPagination struct {
 	NextPage     string `json:"nextPage"`
 	PreviousPage string `json:"previousPage"`

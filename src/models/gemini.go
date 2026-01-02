@@ -51,7 +51,7 @@ func (r ReceiptItemsJSON) ToReceiptItem() (ReceiptItem, error) {
 	var price float64
 	switch prc := r.Price.(type) {
 	case float64:
-		prc = prc
+		price = prc
 	case string:
 		priceStr := strings.ReplaceAll(prc, "$", "")
 		priceFloat, err := strconv.ParseFloat(priceStr, 64)
