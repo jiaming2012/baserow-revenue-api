@@ -17,10 +17,11 @@ type ReceiptJSON struct {
 }
 
 type ReceiptItemsJSON struct {
-	Name     string      `json:"Name"`
-	IsCase   bool        `json:"IsCase"`
-	Quantity interface{} `json:"Quantity"`
-	Price    interface{} `json:"Price"`
+	Name            string       `json:"Name"`
+	IsCase          bool         `json:"IsCase"`
+	Quantity        interface{}  `json:"Quantity"`
+	Price           interface{}  `json:"Price"`
+	PendingPurchase []LinkedItem `json:"PendingPurchase"`
 }
 
 func (r ReceiptItemsJSON) ToReceiptItem() (ReceiptItem, error) {
@@ -66,14 +67,23 @@ func (r ReceiptItemsJSON) ToReceiptItem() (ReceiptItem, error) {
 	receiptItem.Quantity = quantity
 	receiptItem.Price = price
 
+	if len(r.PendingPurchase) == 1 {
+		receiptItem.PendingPurchase = &BaserowPendingPurchase{
+			ID: r.PendingPurchase[0].ID,
+		}
+	} else if len(r.PendingPurchase) > 1 {
+		return ReceiptItem{}, fmt.Errorf("unexpected number of linked pending purchases. Found %d, expected 0 or 1", len(r.PendingPurchase))
+	}
+
 	return receiptItem, nil
 }
 
 type ReceiptItem struct {
-	Quantity int     `json:"Quantity"`
-	Price    float64 `json:"Price"`
-	IsCase   bool    `json:"IsCase"`
-	Name     string  `json:"Name"`
+	Quantity        int                     `json:"Quantity"`
+	Price           float64                 `json:"Price"`
+	IsCase          bool                    `json:"IsCase"`
+	Name            string                  `json:"Name"`
+	PendingPurchase *BaserowPendingPurchase `json:"-"`
 }
 
 type ReceiptSummaryJSON struct {

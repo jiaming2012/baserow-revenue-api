@@ -19,7 +19,14 @@ func FetchReceipts(ctx context.Context, bankApiKey string, start, end time.Time)
 		return
 	}
 
+outer_loop:
 	for _, tx := range resp.Transactions {
+		for _, ignoreName := range IgnoreReceiptsNamed {
+			if tx.BankDescription == ignoreName {
+				continue outer_loop
+			}
+		}
+
 		if len(tx.Attachments) > 0 || tx.Note != "" {
 			validTransactions = append(validTransactions, tx)
 		} else {

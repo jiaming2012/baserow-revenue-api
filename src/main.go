@@ -56,8 +56,8 @@ func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *models
 	}
 
 	// Fetch existing tags from Baserow
-	existingTagsMap := make(map[string]models.BaserowTagTable)
-	tagRows, err := services.ListRows[models.BaserowTagTable](client)
+	existingTagsMap := make(map[string]*models.BaserowTagTable)
+	tagRows, err := models.ListRows[*models.BaserowTagTable](client)
 	for _, tagRow := range tagRows {
 		existingTagsMap[tagRow.TagName] = tagRow
 	}
@@ -70,8 +70,7 @@ func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *models
 				newTagsToAdd = append(newTagsToAdd, models.BaserowTagTable{
 					TagName: tag,
 				})
-				existingTagsMap[tag] = models.BaserowTagTable{
-					// todo: execute to create and get ID
+				existingTagsMap[tag] = &models.BaserowTagTable{
 					TagName: tag,
 				}
 			}
@@ -79,14 +78,14 @@ func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *models
 	}
 
 	for _, tag := range newTagsToAdd {
-		if err := client.CreateRow(tag); err != nil {
+		if err := client.CreateRow(&tag); err != nil {
 			return fmt.Errorf("Failed to create tag row: %w", err)
 		}
 	}
 
 	// Fetch existing purchase items from Baserow
-	existingPurchaseItemsMap := make(map[string]models.BaserowPurchaseItemTable)
-	purchaseItemRows, err := services.ListRows[models.BaserowPurchaseItemTable](client)
+	existingPurchaseItemsMap := make(map[string]*models.BaserowPurchaseItemTable)
+	purchaseItemRows, err := models.ListRows[*models.BaserowPurchaseItemTable](client)
 	if err != nil {
 		return fmt.Errorf("Failed to list purchase item rows: %w", err)
 	}
@@ -109,7 +108,7 @@ func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *models
 				newPurchaseItemsToAdd = append(newPurchaseItemsToAdd, models.BaserowPurchaseItemTable{
 					Description: description,
 				})
-				existingPurchaseItemsMap[description] = models.BaserowPurchaseItemTable{
+				existingPurchaseItemsMap[description] = &models.BaserowPurchaseItemTable{
 					Description: description,
 				}
 			}
@@ -117,14 +116,14 @@ func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *models
 	}
 
 	for _, item := range newPurchaseItemsToAdd {
-		if err := client.CreateRow(item); err != nil {
+		if err := client.CreateRow(&item); err != nil {
 			return fmt.Errorf("Failed to create purchase item row: %w", err)
 		}
 	}
 
 	// Fetch existing purchase item groups from Baserow
 	existingPurchaseItemGroupsMap := make(map[string]interface{})
-	purchaseItemGroupRows, err := services.ListRows[models.BaserowPurchaseItemGroupTable](client)
+	purchaseItemGroupRows, err := models.ListRows[*models.BaserowPurchaseItemGroupTable](client)
 	if err != nil {
 		return fmt.Errorf("Failed to list purchase item group rows: %w", err)
 	}
@@ -182,8 +181,62 @@ func run_apply_purchase_item_groups_fixtures(ctx context.Context, client *models
 	}
 
 	for _, group := range newPurchaseItemGroupsToAdd {
-		if err := client.CreateRow(group); err != nil {
+		if err := client.CreateRow(&group); err != nil {
 			return fmt.Errorf("Failed to create purchase item group row: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func DeriveProcessedPendingPurchase(pendingPurchases []*models.BaserowPendingPurchase, purchases []*models.BaserowPurchaseTable, purchaseEvents map[string]*models.BaserowPurchaseEventTable) ([]*models.BaserowPendingPurchase, error) {
+	groupedPendingPurchases, err := services.GroupPendingPurchasesByBankTxID(pendingPurchases)
+	if err != nil {
+		return nil, fmt.Errorf("DeriveProcessedPendingPurchase: failed to group pending purchases: %w", err)
+	}
+
+	var out []*models.BaserowPendingPurchase
+	for _, ppGroup := range groupedPendingPurchases {
+		for _, pp := range ppGroup {
+			if pp.PurchaseID != nil || pp.PurchaseEventID != nil {
+				out = append(out, pp)
+			}
+		}
+	}
+
+	return out, nil
+}
+
+func remove_processed_pending_purchases(ctx context.Context, baserowClient *models.BaserowClient) error {
+	pendingPurchasesToDelete, err := models.ListRows[*models.BaserowPendingPurchase](baserowClient)
+	if err != nil {
+		return fmt.Errorf("Failed to list pending purchases for deletion: %w", err)
+	}
+
+	currentPurchaseEvents, err := models.ListRows[*models.BaserowPurchaseEventTable](baserowClient)
+	if err != nil {
+		log.Fatal(fmt.Errorf("Failed to list purchase events: %w", err))
+	}
+
+	currentPurchaseEventsMap := make(map[string]*models.BaserowPurchaseEventTable)
+	for _, pe := range currentPurchaseEvents {
+		currentPurchaseEventsMap[pe.BankTxID] = pe
+	}
+
+	currentPurchases, err := models.ListRows[*models.BaserowPurchaseTable](baserowClient)
+	if err != nil {
+		return fmt.Errorf("Failed to list current purchases for deletion: %w", err)
+	}
+
+	processedPendingPurchases, err := DeriveProcessedPendingPurchase(pendingPurchasesToDelete, currentPurchases, currentPurchaseEventsMap)
+	if err != nil {
+		return fmt.Errorf("Failed to derive processed pending purchases for deletion: %w", err)
+	}
+
+	for i := len(processedPendingPurchases) - 1; i >= 0; i-- {
+		pp := processedPendingPurchases[i]
+		if err := baserowClient.DeleteRow(pp); err != nil {
+			return fmt.Errorf("Failed to delete processed pending purchase ID %d: %w", pp.ID, err)
 		}
 	}
 
@@ -216,7 +269,7 @@ func main() {
 	// }
 
 	end := time.Now()
-	start := end.AddDate(0, 0, -7) // 1 week ago
+	start := end.AddDate(0, 0, -14) // 1 week ago
 
 	// if err := run_parse_receipt_with_genai(ctx, client); err != nil {
 	// 	log.Fatal(fmt.Errorf("Failed to parse receipt: %w", err))
@@ -230,90 +283,153 @@ func main() {
 	baserowClient := models.NewBaserowClient("https://api.baserow.io", baserowApiKey)
 
 	// fetch existing purchase events
-	purchaseEventsDTOs, err := services.ListRows[models.BaserowPurchaseEventTableDTO](baserowClient)
+	purchaseEvents, err := models.ListRows[*models.BaserowPurchaseEventTable](baserowClient)
 	if err != nil {
 		log.Fatal(fmt.Errorf("Failed to list purchase events: %w", err))
 	}
 
-	var purchaseEvents []models.BaserowPurchaseEventTable
-	for _, dto := range purchaseEventsDTOs {
-		ev, err := dto.ToBaserowPurchaseEventTable()
-		if err != nil {
-			log.Fatal(fmt.Errorf("Failed to convert purchase event DTO: %w", err))
-		}
-		purchaseEvents = append(purchaseEvents, ev)
-	}
-
 	existingPurchaseEventsMap := make(map[string]interface{})
+	parsedReceiptsMap := make(map[string]interface{})
+	pendingPurchaseIDToPurchaseEventMap := make(map[int]*models.BaserowPurchaseEventTable)
 	for _, pe := range purchaseEvents {
 		existingPurchaseEventsMap[pe.BankTxID] = pe
+		parsedReceiptsMap[pe.BankTxID] = true
+		if pe.PendingPurchaseID != nil {
+			pendingPurchaseIDToPurchaseEventMap[*pe.PendingPurchaseID] = pe
+		}
+	}
+
+	// fetch existing purchases
+	purchases, err := models.ListRows[*models.BaserowPurchaseTable](baserowClient)
+	if err != nil {
+		log.Fatal(fmt.Errorf("Failed to list purchases: %w", err))
+	}
+
+	pendingPurchaseIDToPurchaseMap := make(map[int]*models.BaserowPurchaseTable)
+	for _, p := range purchases {
+		for _, ppID := range p.PendingPurchaseIDs {
+			pendingPurchaseIDToPurchaseMap[ppID] = p
+		}
+	}
+
+	// add pending purchase events to parsed receipts
+	pendingPurchases, err := models.ListRows[*models.BaserowPendingPurchase](baserowClient)
+	if err != nil {
+		log.Fatal(fmt.Errorf("Failed to list pending purchases: %w", err))
+	}
+
+	// remove processed pending purchases from pendingPurchases
+	for i := len(pendingPurchases) - 1; i >= 0; i-- {
+		pp := pendingPurchases[i]
+		if _, exists := pendingPurchaseIDToPurchaseMap[pp.ID]; exists {
+			pendingPurchases = append(pendingPurchases[:i], pendingPurchases[i+1:]...)
+		} else if _, exists := pendingPurchaseIDToPurchaseEventMap[pp.ID]; exists {
+			pendingPurchases = append(pendingPurchases[:i], pendingPurchases[i+1:]...)
+		}
+	}
+
+	groupedPendingPurchases, err := services.GroupPendingPurchasesByBankTxID(pendingPurchases)
+	if err != nil {
+		log.Fatalf("Failed to group pending purchases by bank tx ID: %v", err)
+	}
+
+	for bankTxID := range groupedPendingPurchases {
+		parsedReceiptsMap[bankTxID] = true
 	}
 
 	var newPurchaseRequests []models.CreateBaserowPurchaseRequest
+
+	// validate and add pending purchase requests
+	for _, pp := range groupedPendingPurchases {
+		purchaseReq, err := models.NewCreateBaserowPurchaseRequestFromPendingPurchases(pp)
+		if err != nil {
+			log.Fatalf("Invalid pending purchase for bank tx ID %s: %v", pp[0].BankTxID, err)
+		}
+
+		if err := services.ValidateReceiptData(purchaseReq.ReceiptItems, purchaseReq.ReceiptSummary, purchaseReq.BankTransaction); err != nil {
+			for _, item := range pp {
+				if len(item.Reason) > 0 {
+					if !strings.Contains(item.Reason, err.Error()) {
+						if err := baserowClient.UpdateRow(item, fmt.Sprintf(`{"Reason": "%s"}`, err.Error())); err != nil {
+							log.Fatalf("Failed to update pending purchase reason: %v", err)
+						}
+					}
+				}
+			}
+			log.Errorf("Invalid receipt data in pending purchase for bank tx ID %s: %v", pp[0].BankTxID, err)
+			continue
+		}
+
+		newPurchaseRequests = append(newPurchaseRequests, purchaseReq)
+	}
+
+	// fetch new receipts from bank
 	validTx, invalidTx, err := services.FetchReceipts(context.Background(), bankApiKey, start, end)
 	if len(validTx) > 0 {
-		missingPurchaseEvents := getMissingItems(existingPurchaseEventsMap, validTx, func(tx *models.MercuryTransaction) string {
+		missingPurchaseEvents := getMissingItems(parsedReceiptsMap, validTx, func(tx *models.MercuryTransaction) string {
 			return tx.ID
 		})
 
-		for _, ev := range missingPurchaseEvents {
-			if len(ev.Attachments) > 0 {
-				for _, att := range ev.Attachments {
-					items, summary, err := services.ParseReceipt(ctx, aiClient, att.URL)
-					if err != nil {
-						log.Fatalf("Failed to parse receipt: %v, from %+v", err, ev)
-					}
+		for _, mercuryTx := range missingPurchaseEvents {
+			if len(mercuryTx.Attachments) > 1 {
+				log.Fatalf("Expected 0 or 1 attachment for tx ID %s, got %d", mercuryTx.ID, len(mercuryTx.Attachments))
+			} else if len(mercuryTx.Attachments) == 1 {
+				attachment := mercuryTx.Attachments[0]
 
-					mercuryTx := ev
-
-					req, err := models.NewBaserowPurchaseRequest(summary, items, mercuryTx)
-					if err != nil {
-						log.Fatalf("Failed to create Baserow purchase request: %v", err)
-					}
-
-					newPurchaseRequests = append(newPurchaseRequests, req)
+				items, summary, err := services.ParseReceipt(ctx, aiClient, attachment.URL)
+				if err != nil {
+					log.Fatalf("Failed to parse receipt: %v, from %+v", err, mercuryTx)
 				}
-			}
 
-			// temp: for testing
-			if len(newPurchaseRequests) > 0 {
-				break
+				if err := services.ValidateReceiptData(items, summary, mercuryTx); err != nil {
+					log.Errorf("Invalid receipt data: %v, from %+v", err, mercuryTx)
+
+					log.Info("Storing invalid transaction for review in PendingPurchases table")
+					pendingPurchases, err := models.NewBaserowPendingPurchases(summary, items, mercuryTx, err)
+					if err != nil {
+						log.Fatalf("Failed to create Baserow pending purchases: %v", err)
+					}
+
+					for _, pp := range pendingPurchases {
+						if err := baserowClient.CreateRow(pp); err != nil {
+							log.Fatalf("Failed to create pending purchase row: %v", err)
+						}
+					}
+
+					continue
+				}
+
+				req, err := models.NewCreateBaserowPurchaseRequest(summary, items, mercuryTx, nil)
+				if err != nil {
+					log.Fatalf("Failed to create Baserow purchase request: %v", err)
+				}
+
+				newPurchaseRequests = append(newPurchaseRequests, req)
 			}
 		}
 	}
 
 	// fetch existing vendors
-	exisitingVendors, err := services.ListRows[models.BaserowVendorTable](baserowClient)
+	exisitingVendors, err := models.ListRows[*models.BaserowVendorTable](baserowClient)
 	if err != nil {
 		log.Fatal(fmt.Errorf("Failed to list existing vendors: %w", err))
 	}
 
-	existingVendorsMap := make(map[string]models.BaserowVendorTable)
+	existingVendorsMap := make(map[string]*models.BaserowVendorTable)
 	for _, v := range exisitingVendors {
 		existingVendorsMap[v.Name] = v
 	}
 
 	// fetch existing purchase items
-	existingPurchaseItems, err := services.ListRows[models.BaserowPurchaseItemTable](baserowClient)
+	existingPurchaseItems, err := models.ListRows[*models.BaserowPurchaseItemTable](baserowClient)
 	if err != nil {
 		log.Fatal(fmt.Errorf("Failed to list existing purchase items: %w", err))
 	}
 
-	existingPurchaseItemMap := make(map[string]models.BaserowPurchaseItemTable)
+	existingPurchaseItemMap := make(map[string]*models.BaserowPurchaseItemTable)
 	for _, pi := range existingPurchaseItems {
 		existingPurchaseItemMap[pi.Description] = pi
 	}
-
-	// fetch existing purchases
-	// existingPurchases, err := services.ListRows[models.BaserowPurchaseEventTable](baserowClient)
-	// if err != nil {
-	// 	log.Fatal(fmt.Errorf("Failed to list existing purchases: %w", err))
-	// }
-
-	// existingPurchasesMap := make(map[string]models.BaserowPurchaseEventTable)
-	// for _, p := range existingPurchases {
-	// 	existingPurchasesMap[p.BankTxID] = p
-	// }
 
 	// process new purchase requests
 	for _, pr := range newPurchaseRequests {
@@ -328,7 +444,7 @@ func main() {
 			}
 
 			// update vendor map
-			existingVendorsMap[vendorPk] = *newVendor
+			existingVendorsMap[vendorPk] = newVendor
 		}
 
 		// update receipt summary vendor to use primary key
@@ -348,7 +464,7 @@ func main() {
 
 			purchaseEventID = purchaseEvent.BankTxID
 		} else {
-			purchaseEventID = existingPurchaseEventsMap[pr.BankTransaction.ID].(models.BaserowPurchaseEventTable).BankTxID
+			purchaseEventID = existingPurchaseEventsMap[pr.BankTransaction.ID].(*models.BaserowPurchaseEventTable).BankTxID
 		}
 
 		for _, item := range pr.ReceiptItems {
@@ -356,12 +472,12 @@ func main() {
 			if isNew {
 				purchaseItem := models.NewBaserowPurchaseItemTable(purchaseItemID)
 
-				if err := baserowClient.CreateRow(purchaseItem); err != nil {
+				if err := baserowClient.CreateRow(&purchaseItem); err != nil {
 					log.Fatal(fmt.Errorf("Failed to create purchase item: %w", err))
 				}
 
 				// update purchase item map
-				existingPurchaseItemMap[purchaseItem.Description] = purchaseItem
+				existingPurchaseItemMap[purchaseItem.Description] = &purchaseItem
 			}
 
 			purchase := models.NewBaserowPurchaseTable(item, purchaseItemID, purchaseEventID)
@@ -370,6 +486,11 @@ func main() {
 				log.Fatal(fmt.Errorf("Failed to create purchase: %w", err))
 			}
 		}
+	}
+
+	// remove processed pending purchases
+	if err := remove_processed_pending_purchases(ctx, baserowClient); err != nil {
+		log.Fatal(fmt.Errorf("Failed to remove processed pending purchases: %w", err))
 	}
 
 	if err != nil {

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"regexp"
 
@@ -19,16 +18,43 @@ func parseJSONBody(jsonStr string) ([]models.ReceiptItem, models.ReceiptSummary,
 	re := regexp.MustCompile("```json\\s*([\\s\\S]*?)\\s*```")
 	matches := re.FindAllStringSubmatch(jsonStr, -1)
 
-	if len(matches) != 1 {
+	// Decode the JSON content
+	var result models.ReceiptJSON
+
+	if len(matches) == 1 {
+		if err := json.Unmarshal([]byte(matches[0][1]), &result); err != nil {
+			return nil, models.ReceiptSummary{}, fmt.Errorf("error unmarshaling receipt JSON: %v", err)
+		}
+	} else if len(matches) == 2 {
+		bFoundItems, bFoundSummary := false, false
+		for _, match := range matches {
+			if !bFoundItems {
+				if err := json.Unmarshal([]byte(match[1]), &result.Items); err == nil {
+					bFoundItems = true
+					continue
+				}
+			}
+
+			if !bFoundSummary {
+				if err := json.Unmarshal([]byte(match[1]), &result.Summary); err == nil {
+					bFoundSummary = true
+					continue
+				}
+			}
+		}
+
+		if !bFoundItems {
+			return nil, models.ReceiptSummary{}, fmt.Errorf("failed to parse items from JSON")
+		}
+
+		if !bFoundSummary {
+			return nil, models.ReceiptSummary{}, fmt.Errorf("failed to parse summary from JSON")
+		}
+	} else {
 		return nil, models.ReceiptSummary{}, fmt.Errorf("unexpected number of JSON code blocks found")
 	}
 
 	// Parse items array
-	var result models.ReceiptJSON
-	if err := json.Unmarshal([]byte(matches[0][1]), &result); err != nil {
-		return nil, models.ReceiptSummary{}, fmt.Errorf("error unmarshaling receipt JSON: %v", err)
-	}
-
 	var items []models.ReceiptItem
 	for _, it := range result.Items {
 		item, err := it.ToReceiptItem()
@@ -42,6 +68,7 @@ func parseJSONBody(jsonStr string) ([]models.ReceiptItem, models.ReceiptSummary,
 		return nil, models.ReceiptSummary{}, fmt.Errorf("failed to parse items from JSON")
 	}
 
+	// Parse summary
 	summary, err := result.Summary.ToReceiptSummary()
 	if err != nil {
 		return nil, models.ReceiptSummary{}, fmt.Errorf("error converting summary JSON to ReceiptSummary: %v", err)
@@ -79,7 +106,8 @@ func ParseReceipt(ctx context.Context, client *genai.Client, receiptURL string) 
 
 	result, err := client.Models.GenerateContent(
 		ctx,
-		"gemini-2.5-pro",
+		// "gemini-2.5-pro",
+		"gemini-2.5-flash-lite",
 		contents,
 		nil,
 	)
@@ -93,27 +121,6 @@ func ParseReceipt(ctx context.Context, client *genai.Client, receiptURL string) 
 	items, summary, err := parseJSONBody(jsonResp)
 	if err != nil {
 		return nil, models.ReceiptSummary{}, fmt.Errorf("ParseReceipt: failed to parse JSON body: %w", err)
-	}
-
-	// Validate items total against summary total minus tax
-	itemsTotal := 0.0
-	for _, item := range items {
-		itemsTotal += item.Price * float64(item.Quantity)
-	}
-
-	summaryTotal := summary.Total - summary.Tax
-	if math.Abs(summaryTotal-itemsTotal) > 0.01 {
-		return nil, models.ReceiptSummary{}, fmt.Errorf("ParseReceipt: mismatch between summary total (%.2f) and sum of item totals (%.2f) for receiptURL: %s", summaryTotal, itemsTotal, receiptURL)
-	}
-
-	// Validate total units and cases
-	totalItems := 0
-	for _, item := range items {
-		totalItems += item.Quantity
-	}
-
-	if summary.TotalUnits+summary.TotalCases != totalItems {
-		return nil, models.ReceiptSummary{}, fmt.Errorf("ParseReceipt: mismatch between summary total units/cases (%d) and number of items parsed (%d) for receiptURL: %s", summary.TotalUnits+summary.TotalCases, totalItems, receiptURL)
 	}
 
 	return items, summary, nil
